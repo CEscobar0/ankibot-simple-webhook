@@ -1,70 +1,60 @@
 const express = require('express');
-const { GoogleSpreadsheet } = require('google-spreadsheet');
-const { JWT } = require('google-auth-library');
+const bodyParser = require('body-parser');
 const axios = require('axios');
+require('dotenv').config();
 
-const app = express().use(express.json());
+const app = express().use(bodyParser.json());
 
-// Memoria temporal para llevar el paso de cada usuario
-const userStates = {}; 
+// Variables de entorno
+const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
-// CONFIGURACIÓN GOOGLE SHEETS
-const serviceAccountAuth = new JWT({
-  email: 'TU_EMAIL_DE_GOOGLE_SERVICE_ACCOUNT',
-  key: 'TU_PRIVATE_KEY_DE_GOOGLE',
-  scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-});
+// 1. Verificación del Webhook para Meta
+app.get('/webhook', (req, res) => {
+    const mode = req.query['hub.mode'];
+    const token = req.query['hub.verify_token'];
+    const challenge = req.query['hub.challenge'];
 
-const doc = new GoogleSpreadsheet('ID_DE_TU_HOJA_DE_CALCULO', serviceAccountAuth);
-
-app.post('/webhook', async (req, res) => {
-    const entry = req.body.entry[0];
-    const messaging = entry.messaging[0];
-    const senderId = messaging.sender.id;
-
-    // 1. Detectar inicio desde el Anuncio
-    if (messaging.postback && messaging.postback.payload === 'START_FLOW') {
-        userStates[senderId] = { step: 'ASK_NAME' };
-        await enviarMensaje(senderId, "¡Excelente! ¿Cuál es tu nombre y apellido?");
-    } 
-    
-    // 2. Procesar respuestas de texto
-    else if (messaging.message && !messaging.message.is_echo) {
-        const text = messaging.message.text;
-        const state = userStates[senderId];
-
-        if (state?.step === 'ASK_NAME') {
-            state.nombre = text;
-            state.step = 'ASK_CITY';
-            await enviarMensaje(senderId, `Mucho gusto ${text}, ¿en qué ciudad te encuentras?`);
-        } 
-        else if (state?.step === 'ASK_CITY') {
-            state.ciudad = text;
-            state.step = 'ASK_PHONE';
-            await enviarMensaje(senderId, "Perfecto. Por último, déjanos tu número de teléfono.");
-        } 
-        else if (state?.step === 'ASK_PHONE') {
-            state.telefono = text;
-            // GUARDAR EN GOOGLE SHEETS
-            await guardarEnSheets(state);
-            await enviarMensaje(senderId, "¡Gracias! Tus datos han sido registrados. Un asesor te contactará pronto.");
-            delete userStates[senderId]; // Limpiar estado
+    if (mode && token) {
+        if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+            console.log('WEBHOOK_VERIFICADO');
+            res.status(200).send(challenge);
+        } else {
+            res.sendStatus(403);
         }
     }
-    res.sendStatus(200);
 });
 
-async function guardarEnSheets(data) {
-    await doc.loadInfo();
-    const sheet = doc.sheetsByIndex[0];
-    await sheet.addRow({ Nombre: data.nombre, Ciudad: data.ciudad, Telefono: data.telefono });
+// 2. Recepción de mensajes
+app.post('/webhook', (req, res) => {
+    const body = req.body;
+
+    if (body.object === 'instagram') {
+        body.entry.forEach(entry => {
+            const messaging = entry.messaging[0];
+            const senderId = messaging.sender.id;
+
+            if (messaging.message && messaging.message.text) {
+                console.log(`Mensaje recibido de ${senderId}: ${messaging.message.text}`);
+                // Aquí iría tu lógica para pedir nombre, ciudad y teléfono
+                enviarTexto(senderId, "¡Hola! Recibimos tu mensaje. ¿Cómo te llamas?");
+            }
+        });
+        res.status(200).send('EVENT_RECEIVED');
+    } else {
+        res.sendStatus(404);
+    }
+});
+
+async function enviarTexto(recipientId, text) {
+    try {
+        await axios.post(`https://graph.facebook.com/v19.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, {
+            recipient: { id: recipientId },
+            message: { text: text }
+        });
+    } catch (error) {
+        console.error("Error enviando mensaje:", error.response.data);
+    }
 }
 
-async function enviarMensaje(recipientId, text) {
-    await axios.post(`https://graph.facebook.com/v19.0/me/messages?access_token=TU_TOKEN`, {
-        recipient: { id: recipientId },
-        message: { text: text }
-    });
-}
-
-app.listen(process.env.PORT || 3000, () => console.log('Bot activo'));
+app.listen(process.env.PORT || 3000, () => console.log('Servidor activo'));
